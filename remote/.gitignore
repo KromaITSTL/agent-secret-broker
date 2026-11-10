@@ -1,0 +1,12 @@
+node_modules/
+.wrangler/
+.dev.vars
+secret-broker-recovery-kit-*.txt
+*.plain.json
+plain.json
+# Tracked here (the repo root ignores policy.json for the local broker):
+!policy.json
+
+# Plain-text secret exports: never commit
+*.env
+.env

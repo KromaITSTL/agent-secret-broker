@@ -1,0 +1,8 @@
+# Local `wrangler dev` only. Copy to .dev.vars (gitignored).
+# Use a separate GitHub OAuth app with the authorization callback URL set to http://localhost:8788/callback/web (both the connector and the dashboard sign in there)
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+# At least 32 characters (openssl rand -hex 32); shorter keys are refused.
+COOKIE_ENCRYPTION_KEY=
+ALLOWED_GITHUB_IDS=
+# Throwaway dev keys: npm run setup-keys -- --dev

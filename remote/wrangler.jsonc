@@ -1,0 +1,44 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "secret-broker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+
+  // Fonts for the web pages (public files; everything else goes to the Worker).
+  "assets": { "directory": "./public" },
+
+  // OAuth clients, grants and tokens for the Claude connector. Create with:
+  //   npx wrangler kv namespace create OAUTH_KV
+  // and paste the id it prints below.
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID" }],
+
+  // The vault: secrets, approvals, machines, audit log, settings.
+  "durable_objects": { "bindings": [{ "name": "VAULT", "class_name": "Vault" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Vault"] }],
+
+  // Encrypted nightly backups. Create with:
+  //   npx wrangler r2 bucket create secret-broker-backups
+  "r2_buckets": [{ "binding": "BACKUPS", "bucket_name": "secret-broker-backups" }],
+
+  // Nightly backup at 08:13 UTC.
+  "triggers": { "crons": ["13 8 * * *"] },
+
+  "observability": { "enabled": true },
+
+  "vars": {
+    // The public origin of this Worker, e.g. https://secret-broker.example.workers.dev or your
+    // custom domain. Leave it empty for the first deploy (the Worker then uses the address each
+    // request arrives on), then set it to the URL `npx wrangler deploy` prints and deploy again,
+    // so approval links and OAuth metadata always use one fixed origin. It must be a full URL.
+    "PUBLIC_URL": "",
+    // Comma-separated numeric GitHub user ids allowed to sign in.
+    // Find yours at https://api.github.com/users/<your-login> ("id").
+    "ALLOWED_GITHUB_IDS": "REPLACE_WITH_YOUR_GITHUB_NUMERIC_ID"
+  },
+
+  // Secrets (set with `npx wrangler secret put NAME`, never in this file):
+  //   GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, COOKIE_ENCRYPTION_KEY
+  //   VAULT_MASTER_KEY, BACKUP_PUBLIC_KEY   (set by `npm run setup-keys`)
+  "dev": { "port": 8788 }
+}

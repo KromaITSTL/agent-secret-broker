@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.log
+policy.json
+audit.jsonl
+.playwright-mcp/
+.superpowers/
+.env
+.env.*
+*.env
+.dev.vars
+.wrangler/
+coverage/
+*.plain.json
+secret-broker-recovery-kit-*.txt
