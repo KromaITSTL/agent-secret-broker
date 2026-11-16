@@ -12,9 +12,12 @@ This project uses the `secret-broker` MCP server. Never read, print, copy, commi
 When a task requires credentials:
 
 1. Call `secret_status` first.
-2. Continue only when `authorized` is `true` and `tier` is not null.
-3. If unauthorized, stop and report the broker workspace, then ask the user to restart Claude from this project's root directory and configure its policy (edit `~/.secret-broker/policy.json`, or run `node <path to the secret-broker repo>/scripts/allow.mjs NAME... --tier <vault>` from the project folder you are granting).
-4. Call `secret_list` to obtain the allowed `secret://tier/name` handles.
+2. If it shows `mode: "dashboard"` (approvals on the vault):
+   - If `repo` is null, stop: the folder has no git `origin` remote, and approvals are per repo. Ask the user to open the project folder.
+   - Call `secret_list`. A secret you may use shows `runCommands`, the command lines approved for it.
+   - If a secret you need is not approved for the command you will run, call `secret_request_access` with a clear `reason` and, per secret, `{ "handle": "secret://vault/NAME", "commands": ["supabase db push *"] }` (add `env` for extra non-secret variable names). Ask only for the narrowest commands. Show the returned approval link to the user and wait for them to approve.
+3. Otherwise (no `mode`, the older policy file setup): continue only when `authorized` is `true` and `tier` is not null. If unauthorized, stop and report the broker workspace, and ask the user to grant this project.
+4. Call `secret_list` to obtain the `secret://tier/name` handles.
 5. Run credentialed commands only through `secret_run`. Never resolve a handle yourself or run the command through the normal shell.
 6. Map each required environment variable to its handle:
 
@@ -30,8 +33,8 @@ When a task requires credentials:
    ```
 
 7. Use separate `command` and `args` fields. Do not construct a shell command string.
-8. Only use commands allowed by the project policy. If denied, report the requested invocation and ask the user to approve it by editing `~/.secret-broker/policy.json`, or by running `node <path to the secret-broker repo>/scripts/allow.mjs NAME... --tier <vault>` from the project folder. Never work around the policy.
-9. Non-secret environment values may be passed only when their names are included in the policy's pass-through environment list.
+8. Only use approved commands. If a run is denied, request access for that exact command (dashboard mode) or report the invocation and ask the user to grant it. Never work around a denial.
+9. Non-secret environment values may be passed only when their names are approved (`env` in the request, or the policy's pass-through list).
 10. Treat broker output as redacted. Never attempt to reveal, reconstruct, log, echo, or validate a secret value.
 11. Never ask the user to paste a secret into chat.
 12. On Windows, do not invoke `npm` or `npx` directly through `secret_run`. Use `node` with the appropriate npm or npx JavaScript entry point and ensure that exact invocation is allowlisted.

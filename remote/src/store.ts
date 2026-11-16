@@ -374,6 +374,8 @@ export class VaultLogic {
 
   async createVault(input: { slug: string; name: string; strict?: boolean; repos?: string[]; note?: string; by: string }): Promise<VaultInfo> {
     const slug = checkTier(input.slug.trim().toLowerCase());
+    // The local broker stores its runner token under this name.
+    if (slug === 'runner') throw new VaultError('runner is reserved; pick another vault name');
     if (await this.getVault(slug)) throw new VaultError(`a vault named ${slug} already exists`);
     const info: VaultInfo = {
       slug,
@@ -761,7 +763,7 @@ export class VaultLogic {
     if (!name) throw new VaultError('give the machine a name');
     const tiers = [...new Set(input.tiers.map(checkTier))];
     for (const t of tiers) await this.requireVault(t);
-    if (tiers.length === 0 && !input.canImport) throw new VaultError('pick at least one vault or allow import');
+    // No vaults and no import is a runner token: Claude Code on a PC, which only receives values for runs you approve.
     const id = randomToken(9);
     const secret = randomToken(32);
     const machine: Machine = { id, name, tiers, canImport: input.canImport, tokenHash: await sha256Hex(secret), createdAt: this.now(), createdBy: input.by };

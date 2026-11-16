@@ -1,7 +1,122 @@
-# secret-broker
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
+  <img alt="agent-secret-broker: your agents use secrets, they never see them" src="docs/assets/banner-light.svg" width="100%">
+</picture>
 
-Per-workspace, per-session credential access for agent sessions. The agent
-receives handles like `secret://client-work/globex-db-url`, never values.
+<p align="center">
+  <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/licence-MIT-1f6b5f"></a>
+  <img alt="TypeScript strict" src="https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white">
+  <img alt="Model Context Protocol" src="https://img.shields.io/badge/MCP-server-1c1f1e">
+  <img alt="Runs on Cloudflare Workers" src="https://img.shields.io/badge/Cloudflare-Workers-f38020?logo=cloudflare&logoColor=white">
+  <a href="SECURITY.md"><img alt="Security policy" src="https://img.shields.io/badge/security-policy-1f6b5f"></a>
+</p>
+
+# agent-secret-broker
+
+A credential broker for AI coding agents. Agents work with handles like
+`secret://acme/DB_URL`, never with values. When an agent needs a secret, it
+asks; you get a link on your phone, approve that secret for that repo and that
+command or host, for as long or as many uses as you choose. The value goes
+straight into the approved command or HTTPS request, and anything that comes
+back is redacted. Every use lands in an audit log.
+
+You run it yourself: the vault is a Cloudflare Worker in your own account, and
+the local broker is a small MCP server on your PC.
+
+<p align="center">
+  <img alt="The approval page: one secret approved for supabase db push, a second one flagged because node ** could print it" src="docs/assets/approve-run.png" width="760">
+</p>
+
+## Two ways in
+
+| | **Claude Code, Codex** (local runner) | **Claude app** on web, desktop or phone (connector) |
+|---|---|---|
+| Agent tool | `secret_run`: runs a command with secrets in its environment | `secret_fetch`: one HTTPS request with secrets filled in |
+| You approve | a secret for a repo and the **command lines** that may use it | a secret for a repo and the **hosts, methods and paths** it may go to |
+| Repo comes from | the project's GitHub `origin` remote | the agent, per request |
+| Credential on the device | one runner token in the OS keychain | none (GitHub sign-in) |
+| Good for | migrations, CLIs, deploy scripts | API calls, website logins |
+
+Both use the same vault, the same Approvals page and the same audit log.
+
+## How it fits together
+
+```mermaid
+flowchart LR
+  subgraph PC["Your PC"]
+    AG["Claude Code or Codex"] -- "secret_run<br/>(handles only)" --> LB["Local broker<br/>stdio MCP server"]
+    LB -- "starts it with the value" --> CMD["Approved command<br/>e.g. supabase db push"]
+  end
+  subgraph CF["Your Cloudflare account"]
+    V["Vault Worker<br/>encrypted Durable Object"]
+    D["Dashboard<br/>approvals, audit, freeze"]
+  end
+  APP["Claude app"] -- "MCP connector<br/>secret_fetch" --> V
+  LB -- "runner token:<br/>values for approved runs only" --> V
+  V --- D
+  YOU(("You")) -- "approve from a link" --> D
+```
+
+## What a request looks like
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant A as Agent
+  participant B as Local broker
+  participant V as Vault
+  participant Y as You
+  A->>B: secret_run supabase db push<br/>DB_URL = secret://acme/DB_URL
+  B->>V: values for acme/web-app? (repo read from git)
+  V-->>B: not approved
+  B-->>A: denied, request access
+  A->>B: secret_request_access(DB_URL, "supabase db push *")
+  B->>V: file the request
+  V-->>A: approval link
+  A-->>Y: please approve: https://vault.example.com/approve/...
+  Y->>V: Approve, expires in 24 hours
+  A->>B: secret_run (again)
+  B->>V: values for this run?
+  V-->>B: DB_URL value, this run only
+  B->>B: run the command, redact its output
+  B-->>A: exit code and redacted output
+```
+
+## Quick start: local runner for Claude Code
+
+1. **Deploy your vault.** Follow the Quick start in
+   [`remote/README.md`](remote/README.md): one Cloudflare Worker, a GitHub
+   OAuth app for sign-in, and keys that stay in your recovery kit.
+2. **Add secrets.** Sign in to the dashboard, create a vault per project on
+   the Vaults page, and add values on the Secrets page, or import an existing
+   `.env` with `npm run import-env` from `remote/`.
+3. **Build the local broker.**
+   ```bash
+   git clone https://github.com/<you>/agent-secret-broker.git
+   cd agent-secret-broker
+   npm install
+   npm run build
+   ```
+4. **Create a runner token.** On the dashboard's Machines page, create a token
+   with **no vaults ticked and import left off**. Store it in the OS keychain
+   (Windows Credential Manager, or the macOS login Keychain):
+   ```bash
+   npm run store-token runner
+   ```
+   Input is hidden. The token never goes in a file, an argument or a chat.
+5. **Register the MCP server** with Claude Code (or Codex, see
+   [Wiring into Codex](#wiring-into-codex)):
+   ```bash
+   claude mcp add --scope user secret-broker -- node /path/to/agent-secret-broker/dist/index.js
+   ```
+6. **Tell your agents how to behave.** Paste the block from
+   [`docs/agent-instructions.md`](docs/agent-instructions.md) into your global
+   or project `CLAUDE.md` / `AGENTS.md`.
+7. **Use it.** Restart Claude Code, open any project with a GitHub `origin`
+   remote and ask for something that needs a secret. The agent requests
+   access, you approve from the link, and it runs.
+
+Already using `policy.json`? See [Moving from policy.json](#dashboard-approvals-recommended).
 
 ## Security model and limits
 
@@ -19,7 +134,20 @@ Read this before relying on the broker.
   can read straight from the vault, without touching the policy.
   Harness-level deny rules (for example Claude Code deny rules for
   `~/.secret-broker/**`) reduce this but do not remove it.
-- **Machine tokens.** A machine token returns every value in the vaults it is
+- **Dashboard approvals (runner token).** With a runner token the vault, not
+  this folder, decides: it hands out a value only for a run approved for that
+  repo and command line. Limits:
+  - The vault cannot verify which command really runs; it trusts the broker
+    on your PC to report it.
+  - The repo is read from the project's github.com `origin` remote, which an
+    agent with shell access can change.
+  - Approving a script approves whatever that script does, and an agent that
+    can edit the script can change that. A trailing `*` lets the agent pass any
+    arguments, for example pointing a database tool at another host.
+  - A leaked runner token can obtain the value of every secret with a live run
+    approval, for any repo, and list secret names. It cannot read whole
+    vaults. Revoke it on the Machines page.
+- **Machine tokens.** A vault-scoped machine token returns every value in the vaults it is
   scoped to, in plain text, through the API, with no expiry and no host or
   repo limit. A token with "Can import" can also write values in those
   vaults. Scope each token to the vaults it needs and revoke it on the
@@ -49,7 +177,42 @@ The broker reads secrets from the vault in `remote/`, a Cloudflare Worker you
 deploy yourself; see [`remote/README.md`](remote/README.md). Create that
 first, then store a machine token for each vault (below).
 
-## Policy file
+## Dashboard approvals (recommended)
+
+The details behind the quick start above.
+
+Agents ask for access from inside the project, and you approve on the vault's
+Approvals page, the same way as with the claude.ai connector.
+
+1. On the vault's Machines page, create a token with **no vaults ticked and no
+   import**. That is a runner token.
+2. Store it: `npm run store-token runner` (hidden prompt), then restart Claude
+   Code. The broker now runs in dashboard mode and ignores `policy.json`.
+3. In any project with a GitHub `origin` remote, the agent calls
+   `secret_list`, then `secret_request_access` with each secret and the command
+   lines that will use it (for example `supabase db push *`). You get a link,
+   choose how long or how many uses, and approve.
+4. The agent runs the command with `secret_run`. The broker asks the vault for
+   just those values, every run.
+
+The program name is compared without case or extension (`NODE.exe` reads as
+`node`); arguments keep their case, and `\` reads as `/`. Inside a pattern `*`
+stays within one argument and one path segment, and `**` matches anything; a
+trailing ` *` means any further arguments, or none.
+Production refuses patterns the vault recognises as able to run code of the
+agent's choosing (`node **`, `bash *`, `npx *` and similar); elsewhere they are
+flagged on the approval page. The list is best effort, so read each command
+before approving. Environment names that load code (`NODE_OPTIONS`, `PATH`,
+`LD_*`, proxies and similar) can never be approved.
+
+Moving from `policy.json`: after storing the runner token, run
+`npm run convert-policy` to see, per repo, which secrets agents actually used
+and with which commands (read from the local audit log, names only). Then
+`npm run convert-policy -- --create` files one request per repo on the
+dashboard for you to approve. Folders without a git remote are listed; they get
+nothing.
+
+## Policy file (without a runner token)
 
 Rules live in `~/.secret-broker/policy.json`. Or add them from the project
 folder you are granting, with

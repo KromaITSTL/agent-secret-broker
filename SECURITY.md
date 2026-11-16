@@ -26,6 +26,16 @@ account or Cloudflare account.
 
 ## Security model and known limits
 
+- **Dashboard approvals (runner token).** The vault hands out a value only for a
+  run approved for that repo and command line, but it cannot verify which
+  command really runs: it trusts the local broker's report. The repo comes
+  from the project's git remote, which an agent with shell access can change.
+  Approving a script approves whatever it does, including later edits by the
+  agent. Detection of commands that can run arbitrary code is a best-effort
+  list. A leaked runner token can obtain the value of every secret with a live
+  run approval, for any repo, and list secret names, until it is revoked on the
+  Machines page.
+
 - Single vault: administered by the allowlisted GitHub accounts
   (`ALLOWED_GITHUB_IDS`), each with full control. It is not multi-tenant.
 - Local broker: the command allowlist is the guarantee. Rules that allow

@@ -1,51 +1,17 @@
 import { OAuthProvider } from '@cloudflare/workers-oauth-provider';
 import { createMcpHandler } from 'agents/mcp/server';
-import policyJson from '../policy.json';
 import { runBackup } from './admin';
 import { AuthHandler } from './auth-handler';
-import { createBroker, type AuditEvent, type SecretSource } from './broker';
+import { brokerFor, staticPolicy, staticPolicyError } from './broker-env';
 import { isAllowedUser, registrationDecision, sessionKeyProblem, type Env, type Props } from './env';
-import type { Grants } from './grants';
 import { buildServer } from './mcp';
-import { validatePolicy, type Policy } from './policy';
 import { vaultFor } from './vault-client';
 
 export { Vault } from './vault-do';
 
-// Optional static rules, bundled at deploy time. Normally empty: access is
-// granted per repo on the approval page instead.
-let policy: Policy | null = null;
-let policyError: string | null = null;
-try {
-  policy = validatePolicy(policyJson);
-} catch (err) {
-  policyError = (err as Error).message;
-}
-
 /** The MCP endpoint for an already-authenticated, allowlisted user. */
 export function serveMcp(request: Request, env: Env, ctx: ExecutionContext, props: Props): Promise<Response> {
-  const vault = vaultFor(env);
-  const source: SecretSource = {
-    vaults: async () => (await vault.listVaults()).map(({ slug, name, strict, repos }) => ({ slug, name, strict, repos })),
-    load: (tier) => vault.loadTier(tier),
-    loginInfo: (t, n) => vault.loginInfo(t, n),
-    readSecret: (t, n) => vault.readSecret(t, n),
-    requestVault: (input) => vault.requestVault(input),
-  };
-  // Every MCP-side event lands in the vault's audit log (and Workers Logs). Never values.
-  const audit = (e: AuditEvent) => {
-    console.log(JSON.stringify(e));
-    const { event, user, ...rest } = e;
-    ctx.waitUntil(vault.log({ event, by: user, ...rest }).catch(() => {}));
-  };
-  const broker = createBroker({
-    policy: policy!,
-    grants: vault as unknown as Grants,
-    source,
-    user: props.login,
-    audit,
-    publicUrl: env.PUBLIC_URL || new URL(request.url).origin,
-  });
+  const broker = brokerFor(env, props.login, env.PUBLIC_URL || new URL(request.url).origin, (p) => ctx.waitUntil(p));
   return createMcpHandler(() => buildServer(broker), { route: '/mcp' })(request, env, ctx);
 }
 
@@ -57,7 +23,7 @@ const apiHandler = {
     if (!props?.githubId || !isAllowedUser(env, props.githubId)) {
       return new Response('forbidden', { status: 403 });
     }
-    if (!policy) return new Response(`secret-broker misconfigured: ${policyError}`, { status: 500 });
+    if (!staticPolicy()) return new Response(`secret-broker misconfigured: ${staticPolicyError()}`, { status: 500 });
     return serveMcp(request, env, ctx, props);
   },
 };

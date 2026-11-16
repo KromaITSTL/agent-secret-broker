@@ -474,12 +474,13 @@ ${x.kind === 'project' ? `<h2>Delete vault</h2><form method="post" action="${bas
     return page(
       'Machines',
       `${nav('/machines', a.s.login, a.st)}<h1>Machines</h1>
-<p class="muted">Tokens for your local broker (Claude Code) and the import and restore scripts. A machine can read every value in the vaults you tick; your local broker's policy decides which commands may use them.</p>
+<p class="muted">Tokens for your local broker (Claude Code) and the import and restore scripts. A token with vaults ticked can read every value in them (for scripts and the older policy-file broker). A runner token (nothing ticked) is for Claude Code: it only receives values for runs you approve on the Approvals page.</p>
 ${list.length ? `<table><tr><th>Name</th><th>Vaults</th><th>Created</th><th>Last used</th><th></th></tr>${rows}</table>` : '<div class="card"><p class="muted">No machine tokens yet. Create one below for Claude Code on your PC, or for the import scripts.</p></div>'}
 <h2>Add a machine</h2><div class="card"><form method="post" action="/machines/create">${hidden(a.csrf)}
 <label class="f">Name</label><input type="text" name="name" required placeholder="Alice desktop - personal">
 <fieldset class="group"><legend class="f">Vaults it can read</legend>${vaults.map((t) => (t.kind === 'production' ? `<label class="check risk"><input type="checkbox" name="tier" value="${esc(t.slug)}"> <span>${esc(t.name)} <code>${esc(t.slug)}</code><span class="tag prod">production</span><br><span class="prod">This machine could read every production value. No host or repo limits apply.</span></span></label>` : `<label class="check"><input type="checkbox" name="tier" value="${esc(t.slug)}"> ${esc(t.name)} <code>${esc(t.slug)}</code></label>`)).join('')}</fieldset>
 <label class="check"><input type="checkbox" name="canImport" value="1"> Can import secrets (for import-env and restore; tick no vaults for an import-only token)</label>
+<p class="muted">For Claude Code on a PC, tick nothing: that makes a runner token, which can only use secrets you approve per repo on the Approvals page.</p>
 <div class="row"><button class="primary">Create token</button></div></form></div>`,
     );
   });
@@ -500,8 +501,11 @@ ${list.length ? `<table><tr><th>Name</th><th>Vaults</th><th>Created</th><th>Last
         'Token created',
         `${nav('/machines', a.s.login, a.st)}<h1>Token for ${esc(machine.name)}</h1>
 <p><strong>Copy it now. It is not stored and cannot be shown again.</strong></p><div class="tok">${esc(token)}</div>
-<h2>Use it with your local broker</h2><p>In <code>secret-broker</code> (the repo root), for each vault this token covers (${esc(machine.tiers.join(', ') || 'none')}):</p>
-<pre class="card">npm run store-token ${esc(machine.tiers[0] ?? 'personal')}</pre><p class="muted">and paste the token when asked. The same token can be stored for several vaults.</p>
+${machine.tiers.length === 0 && !machine.canImport
+  ? `<h2>Use it with your local broker</h2><p>This is a runner token. In <code>secret-broker</code> (the repo root), run:</p>
+<pre class="card">npm run store-token runner</pre><p class="muted">and paste the token when asked, then restart Claude Code. Agents then ask for access from inside each project and you approve here.</p>`
+  : `<h2>Use it with your local broker</h2><p>In <code>secret-broker</code> (the repo root), for each vault this token covers (${esc(machine.tiers.join(', ') || 'none')}):</p>
+<pre class="card">npm run store-token ${esc(machine.tiers[0] ?? 'personal')}</pre><p class="muted">and paste the token when asked. The same token can be stored for several vaults.</p>`}
 <p><a href="/machines">Done</a></p>`,
       );
     } catch (err) {

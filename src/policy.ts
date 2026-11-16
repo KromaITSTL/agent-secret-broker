@@ -114,7 +114,9 @@ export function isEnvKeyAllowed(grant: Grant, key: string): boolean {
  * the agent choose a loader, proxy or search path that runs with the value, so they are
  * refused outright regardless of policy.
  */
-const RESERVED_ENV_RE = /^(PATH|PATHEXT|NODE_OPTIONS|NODE_PATH|BASH_ENV|ENV|PYTHONPATH|PYTHONSTARTUP|LD_.*|DYLD_.*|.*_PROXY)$/i;
+// Kept in step with RESERVED_ENV_RE in remote/src/policy.ts.
+const RESERVED_ENV_RE =
+  /^(PATH.*|ENV|BASH_.*|SHELL.*|COMSPEC|IFS|PS\d|PROMPT_COMMAND|EDITOR|VISUAL|PAGER|BROWSER|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|XDG_.*|TMP|TEMP|TMPDIR|LD_.*|DYLD_.*|.*_PROXY|NODE_(?!ENV$).*|NPM_.*|YARN_.*|PNPM_.*|PYTHON.*|PERL.*|RUBY.*|GEM_.*|BUNDLE_.*|JAVA_.*|_JAVA_.*|JDK_.*|CLASSPATH|DOTNET_.*|CORECLR_.*|COR_.*|GIT_.*|SSH_.*|DENO_.*|BUN_.*|.*_OPTIONS|.*_OPTS)$/i;
 
 export function isReservedEnvKey(key: string): boolean {
   return RESERVED_ENV_RE.test(key);
@@ -125,13 +127,27 @@ export function isReservedEnvKey(key: string): boolean {
  * which is the same as letting it print the secret. Checked by matching the patterns
  * against canary invocations rather than by string-comparing to '*'.
  */
+// Kept in step with EXFIL_CANARIES in remote/src/policy.ts. Best effort: it cannot know every tool that runs code.
 const EXFIL_CANARIES = [
-  'x', 'node -p process.env.X', 'node -e 1', 'npx -y x', 'sh -c 1', 'bash -c 1',
-  'powershell -c 1', 'pwsh -c 1', 'cmd /c x', 'python -c 1', 'python3 -c 1',
+  'x', 'node -p process.env.X', 'node -e 1', 'node --eval 1', 'node --require x', 'node --import x', 'node x.mjs',
+  'npx -y x', 'npm exec x', 'npm run x', 'npm x', 'pnpm dlx x', 'pnpm exec x', 'yarn dlx x', 'bunx x', 'uvx x', 'pipx run x',
+  'node c:/program files/nodejs/node_modules/npm/bin/npx-cli.js -y x', 'tsx -e 1', 'tsx x.ts', 'deno eval 1', 'deno run x', 'bun -e 1', 'bun x.ts',
+  'sh -c 1', 'sh x', 'bash -c 1', 'bash -lc 1', 'bash x', 'zsh -c 1', 'powershell -c 1', 'powershell -command 1', 'pwsh -c 1',
+  'pwsh -command 1', 'cmd /c x', 'python -c 1', 'python -m x', 'python3 -c 1', 'python3 -m x', 'py -c 1', 'perl -e 1',
+  'ruby -e 1', 'php -r 1', 'env x', 'git -c core.pager=x log', 'docker run x', 'wsl x',
 ];
+
+/** The program's file name without case or extension, so `C:/nodejs/NODE.exe **` reads as `node **`. */
+function foldCommand(s: string): string {
+  const t = s.trim().replace(/\\/g, '/');
+  const sp = t.indexOf(' ');
+  const program = sp === -1 ? t : t.slice(0, sp);
+  const base = (program.slice(program.lastIndexOf('/') + 1) || program).toLowerCase().replace(/\.(exe|cmd|bat|com)$/, '');
+  return sp === -1 ? base : base + t.slice(sp);
+}
 
 export function isExfilCapable(commands: string[]): boolean {
   if (commands.length === 0) return false;
-  const match = picomatch(commands, { dot: true });
+  const match = picomatch([...commands, ...commands.map(foldCommand)], { dot: true });
   return EXFIL_CANARIES.some((c) => match(c));
 }

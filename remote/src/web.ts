@@ -11,7 +11,7 @@ import type { Hono } from 'hono';
 import { assertSessionKey, isAllowedUser, type Env } from './env';
 import { isLive, type AccessRequest, type ApprovalLimits, type Grants, type GrantRule, type ListedGrant, type RepoGrant } from './grants';
 import { vaultFor } from './vault-client';
-import { parseHandle } from './policy';
+import { isExfilCapable, parseHandle } from './policy';
 
 const SESSION_COOKIE = '__Host-sb_session';
 const LOGIN_COOKIE = '__Host-sb_login';
@@ -401,11 +401,21 @@ function destination(i: { hosts?: string[]; methods?: string[]; paths?: string[]
 <dt>Paths</dt><dd>${(i.paths ?? ['/**']).map((p) => `<code>${esc(p)}</code>`).join(' ')}</dd></dl>`;
 }
 
-const isReveal = (it: { reveal?: true; action?: 'fetch' | 'reveal' }): boolean => it.reveal === true || it.action === 'reveal';
+type ItemLike = { hosts?: string[]; methods?: string[]; paths?: string[]; reveal?: true; action?: 'fetch' | 'reveal' | 'run'; commands?: string[]; env?: string[] };
 
-/** What an item does, for people: reveal items have no hosts, so they never reach `destination`. */
-function itemDetail(it: { hosts?: string[]; methods?: string[]; paths?: string[]; reveal?: true; action?: 'fetch' | 'reveal' }): string {
-  return isReveal(it) ? '<dl><dt>Access</dt><dd>Reveal to agent</dd></dl>' : destination(it);
+const isReveal = (it: ItemLike): boolean => it.reveal === true || it.action === 'reveal';
+const isRun = (it: ItemLike): boolean => it.commands !== undefined || it.action === 'run';
+
+/** Run items: which commands on the operator's PC may receive the secret. */
+function runDetail(it: ItemLike): string {
+  const wide = isExfilCapable(it.commands ?? []);
+  return `<dl><dt>Run by Claude Code (any of your PCs) as</dt><dd>${(it.commands ?? []).map((c) => `<code>${esc(c)}</code>`).join(' ')}${wide ? '<span class="tag warn">can print the secret</span>' : ''}</dd>
+${it.env?.length ? `<dt>May also set</dt><dd>${it.env.map((e) => `<code>${esc(e)}</code>`).join(' ')}</dd>` : ''}</dl>`;
+}
+
+/** What an item does, for people: reveal and run items have no hosts, so they never reach `destination`. */
+function itemDetail(it: ItemLike): string {
+  return isReveal(it) ? '<dl><dt>Access</dt><dd>Reveal to agent</dd></dl>' : isRun(it) ? runDetail(it) : destination(it);
 }
 
 function tierTag(handle: string): string {
@@ -414,9 +424,14 @@ function tierTag(handle: string): string {
 }
 
 /** Why an approval item deserves a deliberate tick, or null when it is routine. */
-function riskOf(it: { handle: string; hosts?: string[]; paths?: string[]; reveal?: true }): string | null {
+function riskOf(it: { handle: string; hosts?: string[]; paths?: string[]; reveal?: true; commands?: string[] }): string | null {
   const prod = parseHandle(it.handle)?.tier === 'production';
   if (it.reveal === true) return prod ? 'Production login. Approving lets this repo reveal its password to the agent.' : null;
+  if (it.commands !== undefined) {
+    const wide = isExfilCapable(it.commands);
+    if (!prod && !wide) return null;
+    return `${prod ? 'Production secret. ' : ''}${wide ? 'One of these commands lets the agent run its own code, so it could print the secret. ' : ''}Approving lets this repo use it on your PC until you revoke it.`;
+  }
   const wild = (it.hosts ?? []).filter((h) => h.startsWith('*.'));
   const anyPath = !it.paths || it.paths.includes('/**');
   if (!prod && !wild.length) return null;
@@ -518,9 +533,9 @@ function ruleRows(g: ListedGrant, csrf: string): string {
     const live = isLive(r, now);
     const handles = r.secrets.map((s) => `secret://${[r.tier].flat()[0]}/${s}`);
     const prod = [r.tier].flat().includes('production');
-    const wide = prod || (r.hosts ?? []).some((h) => h.startsWith('*.'));
+    const wide = prod || (r.hosts ?? []).some((h) => h.startsWith('*.')) || (r.action === 'run' && isExfilCapable(r.commands ?? []));
     const life = live ? limitText(r, now) || 'no expiry, no use limit' : '';
-    return `<div class="srow${wide && live ? ' risk' : ''}"><div class="sname">${handles.map((h) => `<code>${esc(h)}</code>`).join(' · ')}${prod ? '<span class="tag prod">production</span>' : ''}${r.action === 'reveal' ? '<span class="tag warn">reveal</span>' : ''}</div>
+    return `<div class="srow${wide && live ? ' risk' : ''}"><div class="sname">${handles.map((h) => `<code>${esc(h)}</code>`).join(' · ')}${prod ? '<span class="tag prod">production</span>' : ''}${r.action === 'reveal' ? '<span class="tag warn">reveal</span>' : r.action === 'run' ? '<span class="tag">on your PC</span>' : ''}</div>
 <div class="smeta">${r.description ? `${esc(r.description)} · ` : ''}approved by ${esc(r.approvedBy)}, ${esc(stamp(r.approvedAt))}${life ? ` · ${esc(life)}` : ''}${r.state === 'expired' ? '<span class="tag muted">expired</span>' : r.state === 'used_up' ? '<span class="tag muted">used up</span>' : ''}</div>
 <div class="sact">${confirmAction({ label: 'Revoke', action: '/approvals/revoke', fields: { csrf, repo: g.repo, index: String(i) }, consequence: `Stops <code>${esc(g.repo)}</code> using ${handles.map((h) => `<code>${esc(h)}</code>`).join(', ')}.`, aria: `Revoke ${handles.join(', ')} for ${g.repo}`, quiet: !live })}</div>
 <div class="dl">${itemDetail(r)}</div></div>`;

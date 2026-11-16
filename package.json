@@ -9,6 +9,7 @@
   "scripts": {
     "build": "tsc",
     "store-token": "node dist/store-token.js",
+    "convert-policy": "node dist/convert-cli.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },

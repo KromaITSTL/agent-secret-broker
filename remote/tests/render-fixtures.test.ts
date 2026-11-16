@@ -83,6 +83,8 @@ describe.skipIf(!OUT)('render fixtures', () => {
         { handle: 'secret://production/STRIPE_LIVE_KEY', hosts: ['*.stripe.com'], methods: ['GET'] },
         { handle: 'secret://personal/VENDOR_PORTAL', reveal: true },
         { handle: 'secret://production/BANK_PORTAL', reveal: true },
+        { handle: 'secret://acme-web/DATABASE_URL', commands: ['supabase db push *'], env: ['SUPABASE_DEBUG'] },
+        { handle: 'secret://acme-web/SENDGRID_KEY', commands: ['node **'] },
       ],
     });
 

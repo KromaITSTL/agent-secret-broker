@@ -16,6 +16,10 @@ export interface AccessItem {
   paths?: string[];
   /** Show a website login's fields once instead of sending a secret to a host. */
   reveal?: true;
+  /** Run on the operator's PC by these command lines (local broker), instead of hosts. */
+  commands?: string[];
+  /** Run items: extra non-secret environment variable names the run may set. */
+  env?: string[];
 }
 
 export interface AccessRequest {
@@ -111,6 +115,16 @@ export function itemToRule(item: AccessItem, reason: string): Rule {
   const parsed = parseHandle(item.handle);
   if (!parsed) throw new GrantError(`not a valid handle: ${item.handle}`);
   if (item.reveal === true) return { action: 'reveal', description: reason, tier: parsed.tier, secrets: [parsed.name] };
+  if (item.commands !== undefined) {
+    return {
+      action: 'run',
+      description: reason,
+      tier: parsed.tier,
+      secrets: [parsed.name],
+      commands: Array.isArray(item.commands) ? item.commands.map((c) => String(c).trim()) : [],
+      ...(item.env !== undefined ? { env: Array.isArray(item.env) ? item.env.map((e) => String(e).trim()) : [] } : {}),
+    };
+  }
   return {
     description: reason,
     tier: parsed.tier,
@@ -118,6 +132,42 @@ export function itemToRule(item: AccessItem, reason: string): Rule {
     hosts: (item.hosts ?? []).map((h) => h.trim().toLowerCase()),
     ...(item.methods ? { methods: item.methods.map((m) => m.toUpperCase()) } : {}),
     ...(item.paths ? { paths: item.paths } : {}),
+  };
+}
+
+const strList = (v: unknown, what: string, handle: string): string[] => {
+  if (!Array.isArray(v) || !v.every((x) => typeof x === 'string')) throw new GrantError(`${handle}: ${what} must be a list of strings`);
+  return v.map((x) => x.trim());
+};
+
+/**
+ * Exactly the fields an item may have, trimmed, so what the approval page shows is what gets
+ * approved: unknown keys (an `action`, say) are dropped and strings are normalised up front.
+ */
+export function normalizeItem(item: AccessItem): AccessItem {
+  if (!item || typeof item !== 'object' || typeof item.handle !== 'string') throw new GrantError('each item needs a handle');
+  const handle = item.handle.trim();
+  if (item.commands !== undefined && (item.reveal !== undefined || item.hosts !== undefined || item.methods !== undefined || item.paths !== undefined)) {
+    throw new GrantError(`${handle}: an item either runs commands or goes to hosts, not both`);
+  }
+  if (item.reveal !== undefined && item.reveal !== true) throw new GrantError(`${handle}: reveal must be true or left out`);
+  if (item.commands !== undefined) {
+    return {
+      handle,
+      commands: strList(item.commands, 'commands', handle),
+      ...(item.env !== undefined ? { env: strList(item.env, 'env', handle) } : {}),
+    };
+  }
+  if (item.env !== undefined) throw new GrantError(`${handle}: env is only for items that run commands`);
+  if (item.reveal === true) {
+    if (item.hosts !== undefined || item.methods !== undefined || item.paths !== undefined) throw new GrantError(`${handle}: reveal items take no hosts, methods or paths`);
+    return { handle, reveal: true };
+  }
+  return {
+    handle,
+    ...(item.hosts !== undefined ? { hosts: strList(item.hosts, 'hosts', handle) } : {}),
+    ...(item.methods !== undefined ? { methods: strList(item.methods, 'methods', handle) } : {}),
+    ...(item.paths !== undefined ? { paths: strList(item.paths, 'paths', handle) } : {}),
   };
 }
 
@@ -132,6 +182,7 @@ export function validateRequestInput(input: { repo: string; reason: string; item
   if (!reason) throw new GrantError('reason is required: say what the secrets are for');
   if (!Array.isArray(input.items) || input.items.length === 0) throw new GrantError('items must list at least one secret');
   if (input.items.length > 25) throw new GrantError('at most 25 secrets per request');
+  input = { ...input, items: input.items.map(normalizeItem) };
   const seen = new Set<string>();
   for (const item of input.items) {
     if (seen.has(item.handle)) throw new GrantError(`${item.handle} is listed twice`);
@@ -139,6 +190,9 @@ export function validateRequestInput(input: { repo: string; reason: string; item
   }
   for (const item of input.items) checkRepoLink(item.handle, repo, rules);
   for (const item of input.items) {
+    if (item.commands !== undefined && (item.reveal === true || item.hosts || item.methods || item.paths)) {
+      throw new GrantError(`${item.handle}: an item either runs commands or goes to hosts, not both`);
+    }
     if (item.reveal !== true) continue;
     if (item.hosts || item.methods || item.paths) throw new GrantError(`${item.handle}: reveal items take no hosts, methods or paths`);
     if (rules.isLogin?.(item.handle) !== true) throw new GrantError(`${item.handle} is not a login; reveal is only for website logins`);
@@ -163,7 +217,7 @@ export function checkRepoLink(handle: string, repo: string, rules: VaultRules): 
 
 /** Identity of a rule for de-duplication; ignores description and approval metadata. */
 export function ruleKey(r: Rule): string {
-  return JSON.stringify([r.action ?? 'fetch', r.tier, r.secrets, r.hosts ?? null, r.methods ?? null, r.paths ?? null]);
+  return JSON.stringify([r.action ?? 'fetch', r.tier, r.secrets, r.hosts ?? null, r.methods ?? null, r.paths ?? null, r.commands ?? null, r.env ?? null]);
 }
 
 export class GrantLogic {

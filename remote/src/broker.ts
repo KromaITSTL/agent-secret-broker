@@ -1,6 +1,6 @@
 import { toB64 } from './crypto';
 import { GrantError, isLive, normalizeRepo, validateRequestInput, type AccessItem, type GrantRule, type Grants, type VaultRules } from './grants';
-import { checkHandle, grantFor, handleOf, matchRule, parseHandle, revealRule, ruleCovers, type HandleGrant, type Policy, type Rule, type Tier } from './policy';
+import { checkHandle, grantFor, handleOf, matchRule, parseHandle, revealRule, ruleCovers, runRule, type HandleGrant, type Policy, type Rule, type Tier } from './policy';
 import { makeRedactor } from './redact';
 import type { LoginFields } from './store';
 
@@ -54,7 +54,7 @@ export interface FetchResult {
 }
 
 export interface AuditEvent {
-  event: 'secret_fetch' | 'secret_list' | 'secret_reveal' | 'access_requested';
+  event: 'secret_fetch' | 'secret_list' | 'secret_reveal' | 'secret_run' | 'access_requested';
   repo?: string;
   user: string;
   outcome: 'allowed' | 'denied' | 'error';
@@ -67,6 +67,8 @@ export interface AuditEvent {
   reason?: string;
   /** Approval rule that served a reveal. */
   ruleId?: string;
+  /** Run requests: the command line as the local broker reported it. */
+  command?: string;
   usesLeft?: number;
 }
 
@@ -75,6 +77,8 @@ export type ActiveRule = Rule & Partial<Pick<GrantRule, 'id' | 'expiresAt' | 'us
 
 export interface ListedSecret extends HandleGrant {
   approved: boolean;
+  /** Commands on the operator's PC that may use it (run approvals), for the local broker. */
+  runCommands?: string[];
   kind?: 'login';
   username?: string;
   url?: string;
@@ -102,6 +106,17 @@ export interface BrokerDeps {
 
 export class DeniedError extends Error {
   override name = 'DeniedError';
+}
+
+/** What the operator's local broker sends before a run: it gets values only for an approved run. */
+export interface RunInput {
+  repo: string;
+  command: string;
+  args: string[];
+  /** secret:// handles the run injects. */
+  handles: string[];
+  /** Names of non-secret environment variables the run also sets. */
+  env?: string[];
 }
 
 const PLACEHOLDER_RE = /\{\{\s*([^{}\s]+)\s*\}\}/g;
@@ -208,7 +223,9 @@ export function createBroker(deps: BrokerDeps) {
         for (const name of [...(await deps.source.load(tier)).keys()].sort()) {
           const g = grantFor(policy, tier, name);
           const handle = handleOf(tier, name);
+          const runCommands = [...new Set(policy.rules.filter((r) => r.action === 'run' && ruleCovers(r, tier, name)).flatMap((r) => r.commands ?? []))];
           const entry: ListedSecret = g ? { ...g, approved: true } : { handle, destinations: [], approved: false };
+          if (runCommands.length) entry.runCommands = runCommands;
           // Known limit: one loginInfo RPC per name; add a per-vault batch if lists get slow
           const info = await deps.source.loginInfo(tier, name);
           if (info) {
@@ -252,7 +269,7 @@ export function createBroker(deps: BrokerDeps) {
       approvalUrl: `${base}/approve/${req.id}`,
       repo: req.repo,
       requested: req.items,
-      next: `Show the approval link to the user and wait for them to approve before calling ${input.items.some((i) => i.reveal === true) ? 'secret_fetch or secret_reveal' : 'secret_fetch'} with this repo.`,
+      next: `Show the approval link to the user and wait for them to approve before calling ${input.items.every((i) => i.commands !== undefined) ? 'secret_run' : input.items.some((i) => i.reveal === true) ? 'secret_fetch or secret_reveal' : 'secret_fetch'} with this repo.`,
     };
   }
 
@@ -525,7 +542,76 @@ export function createBroker(deps: BrokerDeps) {
     }
   }
 
-  return { status, list, requestAccess, requestVault, fetch: doFetch, reveal };
+  /**
+   * Values for one approved local run. Every handle must be covered by a live run rule for this
+   * repo that allows the command line and every extra env var name; one use is counted per
+   * limited rule. The command itself is reported by the local broker and cannot be verified here.
+   */
+  async function run(input: RunInput): Promise<{ values: Record<string, string> }> {
+    const base: AuditEvent = { event: 'secret_run', user: deps.user, outcome: 'denied' };
+    const deny = (reason: string): never => {
+      audit({ ...base, reason });
+      throw new DeniedError(reason);
+    };
+    const strArr = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === 'string');
+    if (typeof input?.command !== 'string' || !input.command || /\s/.test(input.command) || !strArr(input.args) || !strArr(input.handles) || (input.env !== undefined && !strArr(input.env))) {
+      return deny('send { repo, command, args, handles, env? }');
+    }
+    let repo: string;
+    try {
+      repo = normalizeRepo(String(input.repo ?? ''));
+    } catch (err) {
+      return deny((err as Error).message);
+    }
+    const handles = [...new Set(input.handles)];
+    const invocation = [input.command, ...input.args].join(' ');
+    Object.assign(base, { repo, handles, command: invocation.slice(0, 300) });
+    if (handles.length === 0) deny('no secret:// handles to inject');
+    if (!deps.grants) deny('per-repo approvals are not enabled on this server');
+    const policy = await policyFor(repo);
+    const limited = new Map<string, ActiveRule>();
+    for (const h of handles) {
+      if (!parseHandle(h)) deny(`not a valid handle: ${h}`);
+      const r = runRule(policy, h, invocation, input.env ?? []);
+      if (!r) deny(`${h} is not approved for ${invocation} in ${repo}. Call secret_request_access with this secret and the command, and have the user approve.`);
+      if (r!.id && r!.usesLeft !== undefined) limited.set(r!.id, r!);
+    }
+    const consumed: string[] = [];
+    for (const id of limited.keys()) {
+      const res = await deps.grants!.consume(repo, id).catch(async (err: unknown) => {
+        await refundAll(repo, consumed);
+        throw err;
+      });
+      if (!res.ok) {
+        await refundAll(repo, consumed);
+        return deny(res.reason);
+      }
+      consumed.push(id);
+    }
+    let served = false;
+    try {
+      const values: Record<string, string> = {};
+      for (const h of handles) {
+        const { tier, name } = parseHandle(h)!;
+        let v: string | null;
+        try {
+          v = await deps.source.readSecret(tier, name);
+        } catch (err) {
+          audit({ ...base, outcome: 'error', reason: (err as Error).message });
+          throw new Error(`could not read ${h}: ${(err as Error).message}`);
+        }
+        if (v === null) return deny(`${h} does not exist in the vault`);
+        values[h] = v;
+      }
+      served = true;
+      audit({ ...base, outcome: 'allowed' });
+      return { values };
+    } finally {
+      if (!served) await refundAll(repo, consumed);
+    }
+  }
+
+  return { status, list, requestAccess, requestVault, fetch: doFetch, reveal, run };
 }
 
 export type Broker = ReturnType<typeof createBroker>;

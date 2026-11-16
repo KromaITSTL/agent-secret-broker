@@ -4,6 +4,7 @@ import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { registerAdminRoutes, type OAuthApi } from '../src/admin';
 import { registerApiRoutes } from '../src/api';
+import { createBroker } from '../src/broker';
 import { sha256Hex } from '../src/crypto';
 import { AuthHandler } from '../src/auth-handler';
 import { addApprovedClient } from '../src/workers-oauth-utils';
@@ -308,6 +309,60 @@ describe('machines and API', () => {
   }
   const api = (path: string, token: string, init: RequestInit = {}) =>
     app.request(path, { ...init, headers: { Authorization: `Bearer ${token}`, ...(init.headers ?? {}) } }, env);
+
+  it('a runner token reads no vault, asks through the dashboard, and gets only approved run values', async () => {
+    await vault.api.putSecret('personal', 'DB_URL', 'db-url-value', 'b');
+    await vault.api.putSecret('personal', 'OTHER', 'other-value', 'b');
+    const runner = await newToken([]);
+    const app2 = new Hono<{ Bindings: Env }>();
+    const v = vault.api;
+    registerApiRoutes(app2, {
+      vault: () => v,
+      broker: (_e, user, publicUrl) =>
+        createBroker({
+          policy: { rules: [] },
+          grants: v as unknown as Grants,
+          source: { vaults: async () => (await v.listVaults()).map(({ slug, name, strict, repos }) => ({ slug, name, strict, repos })), load: (t) => v.loadTier(t), loginInfo: (t, n) => v.loginInfo(t, n), readSecret: (t, n) => v.readSecret(t, n) },
+          user,
+          publicUrl,
+        }),
+    });
+    const call = (tool: string, body: unknown, token = runner) =>
+      app2.request(`https://vault.example.com/api/v1/broker/${tool}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, env);
+    const run = { repo: 'acme/site', command: 'node', args: ['scripts/migrate.mjs'], handles: ['secret://personal/DB_URL'] };
+
+    expect((await api('/api/v1/secrets?tier=personal', runner)).status).toBe(403);
+    expect((await call('run', run, 'sbv.x.y.z')).status).toBe(401);
+    expect((await call('nope', {})).status).toBe(404);
+    expect((await call('run', run)).status).toBe(403);
+    // Only runner tokens may use these routes.
+    expect((await call('run', run, await newToken(['personal']))).status).toBe(403);
+    expect((await call('list', { repo: 'acme/site' }, await newToken([], true))).status).toBe(403);
+    // The local route asks only for runs on the PC.
+    expect((await call('request_access', { repo: 'acme/site', reason: 'x', items: [{ handle: 'secret://personal/DB_URL', hosts: ['api.example.com'] }] })).status).toBe(400);
+    expect((await call('request_access', { repo: 'acme/site', reason: 'x', items: [{ handle: 'secret://personal/DB_URL', reveal: true }] })).status).toBe(400);
+    expect((await call('status', { repo: 42 })).status).toBe(400);
+
+    const req = await call('request_access', { repo: 'acme/site', reason: 'migrations', items: [{ handle: 'secret://personal/DB_URL', commands: ['node scripts/migrate.mjs'] }] });
+    expect(req.status).toBe(200);
+    const { approvalUrl } = (await req.json()) as { approvalUrl: string };
+    expect(approvalUrl).toMatch(/^https:\/\/vault\.example\.com\/approve\//);
+    const pending = await v.listRequests();
+    expect(pending[0]).toMatchObject({ repo: 'acme/site', requestedBy: 'machine:desktop' });
+    await v.approve(pending[0]!.id, [0], 'alice');
+
+    const ok = await call('run', run);
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ values: { 'secret://personal/DB_URL': 'db-url-value' } });
+    expect((await call('run', { ...run, handles: ['secret://personal/OTHER'] })).status).toBe(403);
+    const listed = (await (await call('list', { repo: 'acme/site' })).json()) as { secrets: Array<{ handle: string; runCommands?: string[] }> };
+    expect(listed.secrets.find((x) => x.handle === 'secret://personal/DB_URL')?.runCommands).toEqual(['node scripts/migrate.mjs']);
+    expect(JSON.stringify(listed)).not.toContain('value');
+
+    await v.setFrozen(true, 'b');
+    expect((await call('run', run)).status).toBe(423);
+    await v.setFrozen(false, 'b');
+  });
 
   it('serves a tier only to a token scoped to it; freeze and revoke cut it off', async () => {
     await vault.api.putSecret('personal', 'A', 'value-a', 'b');

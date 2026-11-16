@@ -49,7 +49,8 @@ Worker URL, which the first deploy prints.
 - Single vault: administered by the allowlisted GitHub accounts (`ALLOWED_GITHUB_IDS`), each with full control. It is not multi-tenant.
 - Approvals are keyed by a repo name the agent supplies, so the repo is a claimed boundary, not a verified one.
 - Redaction of responses is best effort.
-- Machine tokens return every value in the vaults they are scoped to, in plain text, through the API, with no expiry and no host or repo limit. A token with "Can import" can also write values in those vaults. Scope each token narrowly and revoke it on the Machines page if it leaks.
+- Runner tokens (no vaults ticked) receive values only for runs approved per repo and command line. The command is reported by the local broker and cannot be verified here; a leaked runner token can use every live run approval and list secret names until revoked.
+- Vault-scoped machine tokens return every value in the vaults they are scoped to, in plain text, through the API, with no expiry and no host or repo limit. A token with "Can import" can also write values in those vaults. Scope each token narrowly and revoke it on the Machines page if it leaks.
 - Dashboard sessions last 12 hours and there is no sign-out button. Connector access tokens last 1 hour, with a 30-day refresh token.
 - Client registration is closed by default. Pressing "Allow a new connection for 15 minutes" on the Connectors page opens a window of 15 minutes that accepts at most 5 registrations; it closes when either runs out or when you press Close now. Every registration and every successful connector sign-in is in the audit log, and registered apps are listed on the Connectors page, where Remove revokes one. A registration lasts 90 days and is renewed when the app is used in the second half of that period, so an app left idle for about six weeks or more can lose it and must be added again in a new window.
 - Dashboard sign-in keeps no server state: the pending sign-in is a signed cookie that expires after 10 minutes, so opening the sign-in page writes nothing.
@@ -63,8 +64,8 @@ Worker URL, which the first deploy prints.
 
 - **Vaults**: `personal` and `production` are built in, plus one vault per client project (e.g. `acme-finance`). A project vault can be linked to its repos, so its secrets can never be approved for anyone else's repo. Production and project vaults are *strict*: approvals must name HTTP methods.
 - **Secrets**: values are never shown again after saving. The last 20 versions are kept for undo, and deleted secrets sit in a 30-day trash.
-- **Approvals**: Claude can see every secret *name*, but can only use a secret after you approve it for a specific repo and specific hosts. Approve from a link on your phone; revoke any time. Changes are immediate.
-- **Machines**: tokens for your local broker and scripts, each limited to the vaults you tick.
+- **Approvals**: Claude can see every secret *name*, but can only use a secret after you approve it for a specific repo and specific hosts, or (from Claude Code on your PC, with a runner token) specific command lines. Approve from a link on your phone; revoke any time. Changes are immediate.
+- **Machines**: tokens for your local broker and scripts. A token with vaults ticked reads those vaults; a runner token (nothing ticked) only receives values for local runs you approve.
 - **Audit**: every use, request, approval, edit, login and backup. Never values.
 - **Backups**: nightly to R2, kept 30 days, plus a download button. Encrypted to a key only your recovery kit holds; this server cannot read them.
 - **Freeze**: one click stops every use of every secret.

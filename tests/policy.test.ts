@@ -140,3 +140,11 @@ describe('isReservedEnvKey', () => {
     expect(isReservedEnvKey('API_KEY')).toBe(false);
   });
 });
+
+describe('isExfilCapable (case and Windows forms)', () => {
+  it('flags upper case, .exe and more interpreters', async () => {
+    const { isExfilCapable } = await import('../src/policy.js');
+    for (const c of ['NODE **', 'node.exe **', 'perl *', 'env **', 'git *', 'docker *']) expect(isExfilCapable([c]), c).toBe(true);
+    expect(isExfilCapable(['supabase db push *'])).toBe(false);
+  });
+});
